@@ -6,6 +6,7 @@ import com.google.common.collect.Maps;
 import org.apache.commons.lang3.StringUtils;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingDeque;
@@ -63,22 +64,26 @@ public class ChannelRegistry {
         }
 
         public NatClient allocateOne() {
-            for (int retry = 0; retry < 5; retry++) {
+            while (true) {
                 NatClient poll = poolQueue.poll();
                 if (poll == null) {
                     log.info("pool queue empty");
                     return null;
                 }
                 if (!poll.getCmdChannel().isActive()) {
-                    log.info("remove channel for client:{}", poll.getClientId());
-                    natClientMap.remove(poll.getClientId());
+                    //TODO queue 的数据结构不合理，需要支持线性remove
+                    NatClient realNatClient = natClientMap.get(poll.getClientId());
+                    if (realNatClient == poll) {
+                        log.info("remove channel for client:{}", poll.getClientId());
+                        natClientMap.remove(poll.getClientId());
+                    }
                     continue;
                 }
 
                 poolQueue.add(poll);
                 return poll;
             }
-            return null;
+
         }
 
 
@@ -146,7 +151,13 @@ public class ChannelRegistry {
     }
 
     public List<String> channelStatus(String group) {
+        if (group == null) {
+            return Collections.emptyList();
+        }
         ClientGroup clientGroup = clientGroupMap.get(group);
+        if (clientGroup == null) {
+            return Collections.emptyList();
+        }
         Collection<NatClient> natClients = clientGroup.natClientMap.values();
         List<String> clientVo = Lists.newArrayList();
         for (NatClient natClient : natClients) {

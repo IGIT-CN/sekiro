@@ -4,6 +4,9 @@ import com.google.common.base.Charsets;
 import com.virjar.sekiro.Constants;
 import com.virjar.sekiro.api.CommonRes;
 import com.virjar.sekiro.netty.protocol.SekiroNatMessage;
+import com.virjar.sekiro.server.netty.http.HeaderNameValue;
+import com.virjar.sekiro.server.netty.nat.NettyInvokeRecord;
+import com.virjar.sekiro.server.netty.nat.TaskRegistry;
 import com.virjar.sekiro.server.util.ReturnUtil;
 
 import org.apache.commons.io.IOUtils;
@@ -18,7 +21,12 @@ import javax.servlet.http.HttpServletResponse;
 
 import external.com.alibaba.fastjson.JSONException;
 import external.com.alibaba.fastjson.JSONObject;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFutureListener;
+import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpVersion;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
@@ -50,12 +58,13 @@ public class NatClient {
         }
         this.cmdChannel = channel;
         this.cmdChannel.attr(Constants.CLIENT_KEY).set(clientId);
+        this.cmdChannel.attr(Constants.GROUP_KEY).set(group);
     }
 
-    public void forward(String paramContent, Integer timeOut, HttpServletResponse httpServletResponse) {
+    private NettyInvokeRecord forwardInternal(String paramContent) {
         log.info("request body: {}   clientId:{}", paramContent, clientId);
         long invokeTaskId = invokeSeqGenerator.incrementAndGet();
-        NettyInvokeRecord nettyInvokeRecord = new NettyInvokeRecord(clientId, invokeTaskId, paramContent);
+        NettyInvokeRecord nettyInvokeRecord = new NettyInvokeRecord(clientId, group, invokeTaskId, paramContent);
 
         SekiroNatMessage proxyMessage = new SekiroNatMessage();
         proxyMessage.setType(SekiroNatMessage.TYPE_INVOKE);
@@ -65,8 +74,58 @@ public class NatClient {
 
         cmdChannel.writeAndFlush(proxyMessage);
 
+        return nettyInvokeRecord;
+    }
+
+    public void forward(String paramContent, final Channel channel) {
+        NettyInvokeRecord nettyInvokeRecord = forwardInternal(paramContent);
+        nettyInvokeRecord.setSekiroResponseEvent(new NettyInvokeRecord.SekiroResponseEvent() {
+            @Override
+            public void onSekiroResponse(SekiroNatMessage sekiroNatMessage) {
+                if (sekiroNatMessage == null) {
+                    ReturnUtil.writeRes(channel, CommonRes.failed("timeout"));
+                    return;
+                }
+
+                byte[] data = sekiroNatMessage.getData();
+                if (data == null) {
+                    ReturnUtil.writeRes(channel, CommonRes.success(null));
+                    return;
+                }
+
+                String responseContentType = sekiroNatMessage.getExtra();
+                if (responseContentType == null) {
+                    responseContentType = "text/plain;charset=utf8";
+                }
+
+                if (StringUtils.containsIgnoreCase(responseContentType, "application/json")) {
+                    String responseJson = new String(sekiroNatMessage.getData(), StandardCharsets.UTF_8);
+                    log.info("receive json response:{}", responseJson);
+                    try {
+                        JSONObject jsonObject = JSONObject.parseObject(responseJson);
+                        ReturnUtil.writeRes(channel, ReturnUtil.from(jsonObject, clientId));
+                        return;
+                    } catch (JSONException e) {
+                        log.warn("parse response failed", e);
+                    }
+                }
+
+                DefaultFullHttpResponse httpResponse = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.wrappedBuffer(data));
+                httpResponse.headers().set(HeaderNameValue.CONTENT_TYPE, responseContentType);
+
+                channel.writeAndFlush(httpResponse).addListener(ChannelFutureListener.CLOSE);
+            }
+        });
+    }
+
+    public void forward(String paramContent, Integer timeOut, HttpServletResponse httpServletResponse) {
+        NettyInvokeRecord nettyInvokeRecord = forwardInternal(paramContent);
         nettyInvokeRecord.waitCallback(timeOut);
         SekiroNatMessage sekiroNatMessage = nettyInvokeRecord.finalResult();
+        if (sekiroNatMessage == null) {
+            ReturnUtil.writeRes(httpServletResponse, CommonRes.failed("timeout"));
+            return;
+        }
 
         byte[] data = sekiroNatMessage.getData();
         if (data == null) {

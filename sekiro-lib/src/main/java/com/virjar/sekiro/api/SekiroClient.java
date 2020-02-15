@@ -4,14 +4,12 @@ package com.virjar.sekiro.api;
 import android.text.TextUtils;
 
 import com.virjar.sekiro.Constants;
+import com.virjar.sekiro.log.SekiroLogger;
 import com.virjar.sekiro.netty.client.ClientChannelHandler;
 import com.virjar.sekiro.netty.client.ClientIdleCheckHandler;
+import com.virjar.sekiro.netty.protocol.SekiroMessageEncoder;
 import com.virjar.sekiro.netty.protocol.SekiroNatMessage;
 import com.virjar.sekiro.netty.protocol.SekiroNatMessageDecoder;
-import com.virjar.sekiro.netty.protocol.SekiroMessageEncoder;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,7 +31,6 @@ public class SekiroClient {
     private String clientId;
     private String group = "default";
 
-    private static final Logger log = LoggerFactory.getLogger(SekiroClient.class);
     private AtomicBoolean isStartUp = new AtomicBoolean(false);
 
     private static Map<String, SekiroClient> allClient = new ConcurrentHashMap<>();
@@ -51,6 +48,10 @@ public class SekiroClient {
         if (TextUtils.isEmpty(group)) {
             this.group = "default";
         }
+    }
+
+    public static SekiroClient start(String serverHost, final String clientID) {
+        return start(serverHost, Constants.defaultNatServerPort, clientID, "default");
     }
 
     public static SekiroClient start(String serverHost, int serverPort, final String clientID) {
@@ -98,14 +99,14 @@ public class SekiroClient {
             natClientBootstrap.handler(new ChannelInitializer<SocketChannel>() {
                 @Override
                 protected void initChannel(SocketChannel socketChannel) throws Exception {
-                    socketChannel.pipeline().addLast(new SekiroNatMessageDecoder(Constants.MAX_FRAME_LENGTH, Constants.LENGTH_FIELD_OFFSET, Constants.LENGTH_FIELD_LENGTH, Constants.LENGTH_ADJUSTMENT, Constants.INITIAL_BYTES_TO_STRIP));
+                    socketChannel.pipeline().addLast(new SekiroNatMessageDecoder());
                     socketChannel.pipeline().addLast(new SekiroMessageEncoder());
 
                     socketChannel.pipeline().addLast(new ClientIdleCheckHandler(SekiroClient.this));
                     socketChannel.pipeline().addLast(new ClientChannelHandler(SekiroClient.this));
                 }
             });
-            log.info("connect to nat server at service startUp");
+            SekiroLogger.info("connect to nat server at service startUp");
             connectNatServer();
 
         }
@@ -120,7 +121,7 @@ public class SekiroClient {
         if (group.equals(newGroup)) {
             return;
         }
-        log.info("the group update from :{} to:{}", group, newGroup);
+        SekiroLogger.info("the group update from :" + group + " to:" + newGroup);
         Channel cmdChannelCopy = cmdChannel;
         if (cmdChannelCopy != null && cmdChannelCopy.isActive()) {
             cmdChannelCopy.close();
@@ -144,17 +145,17 @@ public class SekiroClient {
             return;
         }
         if (isConnecting) {
-            log.warn("connect event fire already");
+            SekiroLogger.warn("connect event fire already");
             return;
         }
         isConnecting = true;
         natClientBootstrap.group().submit(new Runnable() {
             @Override
             public void run() {
-                log.info("connect to nat server...");
+                SekiroLogger.info("connect to nat server...");
                 Channel cmdChannelCopy = cmdChannel;
                 if (cmdChannelCopy != null && cmdChannelCopy.isActive()) {
-                    log.info("cmd channel active, and close channel,heartbeat timeout ?");
+                    SekiroLogger.info("cmd channel active, and close channel,heartbeat timeout ?");
                     cmdChannelCopy.close();
                     //TODO clean up all resource
                 }
@@ -163,11 +164,11 @@ public class SekiroClient {
                     public void operationComplete(ChannelFuture channelFuture) throws Exception {
                         isConnecting = false;
                         if (!channelFuture.isSuccess()) {
-                            log.warn("connect to nat server failed", channelFuture.cause());
+                            SekiroLogger.warn("connect to nat server failed", channelFuture.cause());
                             natClientBootstrap.group().schedule(new Runnable() {
                                 @Override
                                 public void run() {
-                                    log.info("connect to nat server failed, reconnect by scheduler task start");
+                                    SekiroLogger.info("connect to nat server failed, reconnect by scheduler task start");
                                     connectNatServer();
                                 }
                             }, reconnectWait(), TimeUnit.MILLISECONDS);
@@ -175,7 +176,7 @@ public class SekiroClient {
                         } else {
                             sleepTimeMill = 1000;
                             cmdChannel = channelFuture.channel();
-                            log.info("connect to nat server success:{}", cmdChannel);
+                            SekiroLogger.info("connect to nat server success:" + cmdChannel);
 
                             SekiroNatMessage sekiroNatMessage = new SekiroNatMessage();
                             sekiroNatMessage.setType(SekiroNatMessage.C_TYPE_REGISTER);
@@ -211,6 +212,11 @@ public class SekiroClient {
 
     public SekiroClient registerHandler(String action, SekiroRequestHandler sekiroRequestHandler) {
         sekiroRequestHandlerManager.registerHandler(action, sekiroRequestHandler);
+        return this;
+    }
+
+    public SekiroClient registerHandler(ActionHandler actionHandler) {
+        sekiroRequestHandlerManager.registerHandler(actionHandler.action(), actionHandler);
         return this;
     }
 

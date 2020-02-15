@@ -3,10 +3,12 @@ package com.virjar.sekiro.api;
 import android.text.TextUtils;
 
 import com.virjar.sekiro.api.databind.ActionRequestHandlerGenerator;
+import com.virjar.sekiro.api.databind.AutoBind;
 import com.virjar.sekiro.api.databind.DirectMapGenerator;
 import com.virjar.sekiro.api.databind.EmptyARCreateHelper;
 import com.virjar.sekiro.api.databind.FieldBindGenerator;
 import com.virjar.sekiro.api.databind.ICRCreateHelper;
+import com.virjar.sekiro.log.SekiroLogger;
 import com.virjar.sekiro.netty.protocol.SekiroNatMessage;
 import com.virjar.sekiro.utils.Defaults;
 
@@ -24,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 import io.netty.channel.Channel;
+
 
 public class SekiroRequestHandlerManager {
     private static final String action = "action";
@@ -43,6 +46,7 @@ public class SekiroRequestHandlerManager {
             sekiroRequest.getString("ensure mode parsed");
         } catch (Exception e) {
             sekiroResponse.failed(CommonRes.statusBadRequest, e);
+            return;
         }
 
         String action = sekiroRequest.getString(SekiroRequestHandlerManager.action);
@@ -68,12 +72,16 @@ public class SekiroRequestHandlerManager {
         try {
             actionRequestHandlerGenerator.gen(sekiroRequest).handleRequest(sekiroRequest, sekiroResponse);
         } catch (Throwable throwable) {
+            SekiroLogger.error("failed to generate action request handler", throwable);
             sekiroResponse.failed(CommonRes.statusError, throwable);
         }
     }
 
 
     public void registerHandler(String action, SekiroRequestHandler sekiroRequestHandler) {
+        if (TextUtils.isEmpty(action)) {
+            throw new IllegalArgumentException("action empty!!");
+        }
         if (requestHandlerMap.containsKey(action)) {
             throw new IllegalStateException("the request handler: " + sekiroRequestHandler + " for action:" + action + "  registered already!!");
         }
@@ -91,10 +99,58 @@ public class SekiroRequestHandlerManager {
                 instanceCreateHelper = new EmptyARCreateHelper(actionRequestHandler.getClass());
                 break;
             }
-            if (constructor.getParameterTypes().length == 1 && SekiroRequest.class.isAssignableFrom(constructor.getParameterTypes()[0])) {
-                canAutoCreateInstance = true;
-                instanceCreateHelper = new ICRCreateHelper(constructor);
-                break;
+            if (constructor.getParameterTypes().length == 1) {
+                if (SekiroRequest.class.isAssignableFrom(constructor.getParameterTypes()[0])) {
+                    canAutoCreateInstance = true;
+                    instanceCreateHelper = new ICRCreateHelper(constructor);
+                    break;
+                } else if (actionRequestHandler.getClass().getName().startsWith(constructor.getParameterTypes()[0].getName())) {
+
+                    // 可能是匿名内部类，这个时候也需要支持注入
+                    //com.virjar.sekiro.demo.MainActivity$1$1
+                    //com.virjar.sekiro.demo.MainActivity$1
+                    String simpleInnerClassName = actionRequestHandler.getClass().getName().substring(constructor.getParameterTypes()[0].getName().length());
+                    //$1
+                    if (simpleInnerClassName.startsWith("$")) {
+                        //确定是匿名内部类
+                        //find out class object instance
+                        Object outClassObjectInstance = null;
+                        boolean hasAutoBindAnnotation = false;
+                        for (Field field : actionRequestHandler.getClass().getDeclaredFields()) {
+                            if (!field.isSynthetic()) {
+                                continue;
+                            }
+
+                            AutoBind fieldAnnotation = field.getAnnotation(AutoBind.class);
+                            if (fieldAnnotation != null) {
+                                hasAutoBindAnnotation = true;
+                            }
+
+                            if (!field.getType().equals(constructor.getParameterTypes()[0])) {
+                                continue;
+                            }
+
+                            field.setAccessible(true);
+                            try {
+                                outClassObjectInstance = field.get(actionRequestHandler);
+                                break;
+                            } catch (IllegalAccessException e) {
+                                e.printStackTrace();
+                            }
+                        }
+
+                        if (outClassObjectInstance != null && hasAutoBindAnnotation) {
+//                            canAutoCreateInstance = true;
+//                            Class<? extends SekiroRequestHandler> aClass = actionRequestHandler.getClass();
+//                            instanceCreateHelper = new InnerClassCreateHelper(constructor, outClassObjectInstance);
+//                            break;
+                            //不支持匿名内部类的自动绑定
+                            throw new IllegalStateException("can not bind attribute for InnerClass object");
+                        }
+                    }
+                }
+
+
             }
         }
         if (!canAutoCreateInstance) {
